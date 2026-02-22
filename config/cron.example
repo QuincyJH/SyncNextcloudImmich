@@ -1,0 +1,7 @@
+# UTC timezone assumed inside container; set TZ env to change
+# Run album→tag sync hourly
+0 * * * * /app/entrypoint.sh album-sync
+# Run Nextcloud→Immich album sync daily at 02:00
+0 2 * * * /app/entrypoint.sh tag-sync
+# Run immich-go uploads daily at 03:00
+0 3 * * * /app/entrypoint.sh file-sync

@@ -1,0 +1,22 @@
+[
+  {
+    "nextcloud_username": "User_1",
+    "nextcloud_password": "password",
+    "nextcloud_base_url": "https://nextcloud.example.com",  
+    "nextcloud_file_path": "/Path/to/nextcloud/user/folder",
+    "immich_url": "https://immich.example.com",
+    "immich_token": "IMMICH_API_KEY_FOR_USER",
+    "dry_run": false,
+    "whitelist_albums": ["Favorites", "Family"]
+  },
+  {
+    "nextcloud_username": "User_2",
+    "nextcloud_password": "password",
+    "nextcloud_base_url": "https://nextcloud.example.com",
+    "nextcloud_file_path": "/Path/to/nextcloud/user/folder",
+    "immich_url": "https://immich.example.com",
+    "immich_token": "IMMICH_API_KEY_FOR_USER",
+    "dry_run": false,
+    "whitelist_albums": []
+  }
+]

@@ -205,3 +205,17 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Bruno
+SyncNextcloudImmich/
+
+# user config files
+/config/user_config.json
+/config/upload_map.txt
+/config/mapping.json
+/config/cron
+
+# tools
+/tools/immich-go/*
+
+*.code-workspace

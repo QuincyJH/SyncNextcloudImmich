@@ -1,0 +1,10 @@
+from app.services import immich_service
+import logging
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/", response_model=str)
+def convert_album_to_tag():
+    immich_service.convert_album_to_tag()
+    return "album-to-tag started"

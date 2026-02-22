@@ -1,0 +1,4 @@
+# Each line: NEXTCLOUD_PATH IMMICH_API_KEY
+# Example entries:
+/path/to/cloud/data/User1/files [API_KEY]
+/path/to/cloud/data/User2/files [API_KEY]

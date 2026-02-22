@@ -1,0 +1,15 @@
+{
+  "Food": {
+    "Dessert": {
+      "Cakes": {}
+    },
+    "Breakfast": ["Pancakes", "Waffles"]
+  },
+  "Travel": {
+    "Japan": {
+      "Kyoto": {},
+      "Tokyo": {}
+    },
+    "USA": ["New York", "San Francisco"]
+  }
+}

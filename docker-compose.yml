@@ -1,0 +1,31 @@
+services:
+  immich-sync:
+    build: .
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    environment:
+      - TZ=UTC
+      - LOG_LEVEL=INFO
+      - IMMICH_GO_BIN=/tools/immich-go/immich-go
+      - IMMICH_SERVER=${IMMICH_SERVER}
+      - NEXTCLOUD_DB_HOST=${NEXTCLOUD_DB_HOST}
+      - NEXTCLOUD_DB_PORT=${NEXTCLOUD_DB_PORT:-5432}
+      - NEXTCLOUD_DB_NAME=${NEXTCLOUD_DB_NAME}
+      - NEXTCLOUD_DB_USER=${NEXTCLOUD_DB_USER}
+      - NEXTCLOUD_DB_PASSWORD=${NEXTCLOUD_DB_PASSWORD}
+    volumes:
+      - ./config:/config:rw
+      - ./tools/immich-go:/tools/immich-go:ro
+    develop:
+      watch:
+        - action: sync
+          path: ./app
+          target: /app/app
+        - action: sync
+          path: ./config
+          target: /config
+        - action: rebuild
+          path: ./requirements.txt
+        - action: rebuild
+          path: ./Dockerfile
