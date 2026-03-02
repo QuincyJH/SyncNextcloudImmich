@@ -287,7 +287,7 @@ def get_files_for_tag_db(username, tagid):
         WHERE m.systemtagid = %s
           AND m.objecttype = 'files'
           AND s.id = %s
-          AND f.path LIKE 'files/%'
+          AND f.path LIKE 'files/%%'
           AND f.checksum IS NOT NULL;
         """
     )
