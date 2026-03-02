@@ -232,7 +232,7 @@ def remove_tag_from_assets(immich_url, api_key, tag_id, asset_ids, dry_run=False
 # MAIN SYNC LOGIC
 # -----------------------------
 
-def convert_album_to_tag():
+def convert_album_to_tag(dry_run: bool | None = None):
     parser = argparse.ArgumentParser(description="Immich album → hierarchical tag sync")
     parser.add_argument("--dry-run", action="store_true", help="Print intended changes without modifying Immich")
 
@@ -241,6 +241,7 @@ def convert_album_to_tag():
         args.dry_run = dry_run
     else:
         args = parser.parse_args()
+        dry_run = args.dry_run
 
     # Load config
     with open(CONFIG_FILE, "r") as f:
@@ -250,7 +251,7 @@ def convert_album_to_tag():
 
         immich_url = config["immich_url"]
         api_key = config["immich_token"]
-        dry_run = config.get("dry_run", False)
+        dry_run = config.get("dry_run", dry_run)
 
         # Load mapping file
         mapping = load_mapping()
