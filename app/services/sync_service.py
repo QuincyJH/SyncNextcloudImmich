@@ -237,6 +237,7 @@ def run_db_query(sql, params=None):
             host=DB_HOST,
             port=DB_PORT,
             user=DB_USER,
+            password=DB_PASSWORD,
             dbname=DB_NAME,
             connect_timeout=10,
         ) as conn:
