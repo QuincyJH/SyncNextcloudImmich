@@ -300,8 +300,10 @@ def get_files_for_tag_db(username, tagid):
         return results
 
     for path, checksum in rows:
-        if path and checksum:
-            results.append((path, checksum))
+        if not path:
+            continue
+        # Keep file even when checksum is empty; downstream logic can handle None
+        results.append((path, checksum or None))
 
     return results
 
