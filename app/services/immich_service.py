@@ -183,20 +183,29 @@ def _as_bool(value, default=False):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _normalize_label(value):
+    if value is None:
+        return ""
+    return " ".join(str(value).strip().split()).casefold()
+
+
 def find_hierarchical_tag(album_name, mapping):
     """
     Given a flat album name, return the hierarchical tag path.
     Supports unlimited nested dicts and {} leaf nodes.
     """
+    normalized_album_name = _normalize_label(album_name)
+
     for parent, children in mapping.items():
         # Case 0: direct top-level match
-        if album_name == parent:
+        if normalized_album_name == _normalize_label(parent):
             return parent
 
         # Case 1: children is a list
         if isinstance(children, list):
-            if album_name in children:
-                return f"{parent}/{album_name}"
+            for child in children:
+                if normalized_album_name == _normalize_label(child):
+                    return f"{parent}/{child}"
 
         # Case 2: children is a nested dict
         if isinstance(children, dict):
@@ -216,10 +225,12 @@ def search_nested_mapping(target, parent_path, subtree):
       - unlimited depth
     Returns a full path for both intermediate nodes and leaves.
     """
+    normalized_target = _normalize_label(target)
+
     for key, value in subtree.items():
 
         # Case 1: match node itself (works for both intermediate nodes and leaf nodes)
-        if key == target:
+        if _normalize_label(key) == normalized_target:
             return f"{parent_path}/{key}"
 
         # Case 2: nested dict
@@ -229,8 +240,10 @@ def search_nested_mapping(target, parent_path, subtree):
                 return deeper
 
         # Case 3: list of children
-        if isinstance(value, list) and target in value:
-            return f"{parent_path}/{key}/{target}"
+        if isinstance(value, list):
+            for child in value:
+                if _normalize_label(child) == normalized_target:
+                    return f"{parent_path}/{key}/{child}"
 
     return None
 
@@ -314,6 +327,10 @@ def convert_album_to_tag(dry_run: bool | None = None):
         mapped_paths = []
         for album in albums:
             mapped = find_hierarchical_tag(album["albumName"], mapping)
+            if mapped == album["albumName"]:
+                logger.debug(
+                    f"No hierarchy mapping found for album '{album['albumName']}'. Using fallback tag '{mapped}'."
+                )
             mapped_by_album[album["id"]] = mapped
             mapped_paths.append(mapped)
 
