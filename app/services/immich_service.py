@@ -118,6 +118,17 @@ def add_tag_to_assets(immich_url, api_key, tag_id, asset_ids, dry_run=False):
     return r.status_code, r.text
 
 
+def delete_tag(immich_url, api_key, tag_id, dry_run=False):
+    headers = immich_headers(api_key)
+    if dry_run:
+        logger.info(f"DRY RUN: Would delete tag {tag_id}")
+        return 200, "DRY RUN"
+    r = requests.delete(f"{immich_url}/api/tags/{tag_id}", headers=headers)
+    if r.status_code not in (200, 204):
+        logger.warning(f"Failed to delete tag {tag_id}: {r.status_code} {r.text}")
+    return r.status_code, r.text
+
+
 def get_tag_id_by_name(immich_url, api_key, tag_name):
     headers = immich_headers(api_key)
     r = requests.get(f"{immich_url}/api/tags", headers=headers)
@@ -277,6 +288,53 @@ def remove_tag_from_assets(immich_url, api_key, tag_id, asset_ids, dry_run=False
         r = requests.delete(f"{immich_url}/api/tags/{tag_id}/assets/{aid}", headers=headers)
         if r.status_code not in (200, 204):
             logger.warning(f"Failed to remove tag {tag_id} from asset {aid}: {r.status_code} {r.text}")
+
+
+def clear_all_tags(dry_run: bool = False):
+    """Delete all tags from each configured Immich account."""
+    with open(CONFIG_FILE, "r") as f:
+        configs = json.load(f)
+
+    for config in configs:
+        immich_url = config["immich_url"]
+        api_key = config["immich_token"]
+
+        tags = get_all_tags(immich_url, api_key)
+        if not tags:
+            logger.info("No tags found to delete.")
+            continue
+
+        id_index = {t.get("id"): t for t in tags if t.get("id")}
+
+        def _depth(tag):
+            depth = 0
+            cur = tag
+            seen = set()
+            while cur:
+                tid = cur.get("id")
+                if tid in seen:
+                    break
+                seen.add(tid)
+                pid = _tag_parent_id(cur)
+                cur = id_index.get(pid)
+                if cur:
+                    depth += 1
+            return depth
+
+        # Delete deepest children first, then parents.
+        ordered_tags = sorted(tags, key=_depth, reverse=True)
+        logger.info(f"Found {len(ordered_tags)} tags. Deleting child-first order.")
+
+        deleted = 0
+        for tag in ordered_tags:
+            tag_id = tag.get("id")
+            if not tag_id:
+                continue
+            status, _ = delete_tag(immich_url, api_key, tag_id, dry_run=dry_run)
+            if status in (200, 204):
+                deleted += 1
+
+        logger.info(f"Deleted {deleted}/{len(ordered_tags)} tags.")
 
 
 # -----------------------------
