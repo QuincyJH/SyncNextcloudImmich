@@ -131,6 +131,14 @@ def get_tag_id_by_name(immich_url, api_key, tag_name):
     return None
 
 
+def _tag_name(tag):
+    return tag.get("value") or tag.get("name")
+
+
+def _tag_parent_id(tag):
+    return tag.get("parentId") or tag.get("parentTagId")
+
+
 def _build_tag_maps(tags):
     """
     Build helpful maps:
@@ -141,14 +149,16 @@ def _build_tag_maps(tags):
     id_index = {t["id"]: t for t in tags}
     name_index = {}
     for t in tags:
-        name_index.setdefault(t.get("value"), []).append(t)
+        tag_name = _tag_name(t)
+        if tag_name:
+            name_index.setdefault(tag_name, []).append(t)
 
     def _path_for(tag):
         parts = []
         cur = tag
         while cur:
-            parts.append(cur.get("value"))
-            pid = cur.get("parentId")
+            parts.append(_tag_name(cur))
+            pid = _tag_parent_id(cur)
             cur = id_index.get(pid)
         return "/".join(reversed(parts))
 
@@ -165,12 +175,23 @@ def load_mapping():
         return json.load(f)
 
 
+def _as_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 def find_hierarchical_tag(album_name, mapping):
     """
     Given a flat album name, return the hierarchical tag path.
     Supports unlimited nested dicts and {} leaf nodes.
     """
     for parent, children in mapping.items():
+        # Case 0: direct top-level match
+        if album_name == parent:
+            return parent
 
         # Case 1: children is a list
         if isinstance(children, list):
@@ -193,11 +214,12 @@ def search_nested_mapping(target, parent_path, subtree):
       - parent: [list]
       - parent: { child: {}, child: { ... } }
       - unlimited depth
+    Returns a full path for both intermediate nodes and leaves.
     """
     for key, value in subtree.items():
 
-        # Case 1: leaf node (empty dict)
-        if key == target and isinstance(value, dict) and len(value) == 0:
+        # Case 1: match node itself (works for both intermediate nodes and leaf nodes)
+        if key == target:
             return f"{parent_path}/{key}"
 
         # Case 2: nested dict
@@ -268,7 +290,10 @@ def convert_album_to_tag(dry_run: bool | None = None):
         immich_url = config["immich_url"]
         api_key = config["immich_token"]
         dry_run = config.get("dry_run", dry_run)
-        leaf_only_tagging = config.get("leaf_only_tagging", LEAF_ONLY_TAGGING_DEFAULT)
+        leaf_only_tagging = _as_bool(
+            config.get("leaf_only_tagging", LEAF_ONLY_TAGGING_DEFAULT),
+            LEAF_ONLY_TAGGING_DEFAULT,
+        )
 
         # Load mapping file
         mapping = load_mapping()
@@ -340,13 +365,16 @@ def convert_album_to_tag(dry_run: bool | None = None):
 
             # Remove standalone leaf tag (same name, no parent) to avoid duplicates
             leaf = hierarchical_tag.split("/")[-1]
-            standalone_leaf_id = None
-            for t in name_index.get(leaf, []):
-                if not t.get("parentId"):
-                    standalone_leaf_id = t["id"]
-                    break
-            if standalone_leaf_id and standalone_leaf_id != tag_id:
-                logger.info(f"Removing standalone leaf tag '{leaf}' from assets.")
-                remove_tag_from_assets(immich_url, api_key, standalone_leaf_id, asset_ids, dry_run=dry_run)
+            standalone_leaf_ids = [
+                t["id"]
+                for t in name_index.get(leaf, [])
+                if not _tag_parent_id(t) and t.get("id") != tag_id
+            ]
+            if standalone_leaf_ids:
+                logger.info(
+                    f"Removing {len(standalone_leaf_ids)} standalone leaf tag(s) named '{leaf}' from assets."
+                )
+                for standalone_leaf_id in standalone_leaf_ids:
+                    remove_tag_from_assets(immich_url, api_key, standalone_leaf_id, asset_ids, dry_run=dry_run)
 
     logger.info("Album → hierarchical tag sync run complete.")
