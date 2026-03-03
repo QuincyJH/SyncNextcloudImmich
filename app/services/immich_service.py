@@ -15,6 +15,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.environ.get("CONFIG_FILE", os.path.join("/config", "user_config.json"))
 MAPPING_FILE = os.environ.get("MAPPING_FILE", os.path.join("/config", "mapping.json"))
 LOGFILE = os.environ.get("LOGFILE", os.path.join("/config", "immich_album_tag_sync.log"))
+LEAF_ONLY_TAGGING_DEFAULT = os.environ.get("LEAF_ONLY_TAGGING", "true").lower() in ("1", "true", "yes", "on")
 
 logger = logging.getLogger("ImmichAlbumTagSync")
 logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO")))
@@ -267,6 +268,7 @@ def convert_album_to_tag(dry_run: bool | None = None):
         immich_url = config["immich_url"]
         api_key = config["immich_token"]
         dry_run = config.get("dry_run", dry_run)
+        leaf_only_tagging = config.get("leaf_only_tagging", LEAF_ONLY_TAGGING_DEFAULT)
 
         # Load mapping file
         mapping = load_mapping()
@@ -282,6 +284,28 @@ def convert_album_to_tag(dry_run: bool | None = None):
         albums = get_albums(immich_url, api_key)
         logger.info(f"Found {len(albums)} albums.")
 
+        # Precompute mapped hierarchy path per album and keep only leaf paths.
+        mapped_by_album = {}
+        mapped_paths = []
+        for album in albums:
+            mapped = find_hierarchical_tag(album["albumName"], mapping)
+            mapped_by_album[album["id"]] = mapped
+            mapped_paths.append(mapped)
+
+        non_leaf_paths = set()
+        if leaf_only_tagging:
+            for path in mapped_paths:
+                prefix = f"{path}/"
+                if any(other != path and other.startswith(prefix) for other in mapped_paths):
+                    non_leaf_paths.add(path)
+
+            if non_leaf_paths:
+                logger.info(
+                    f"Skipping {len(non_leaf_paths)} non-leaf mapped tags to avoid parent-tag duplication."
+                )
+        else:
+            logger.info("Leaf-only tagging disabled; parent mapped tags will also be applied.")
+
         for album in albums:
             album_id = album["id"]
             album_name = album["albumName"]
@@ -289,7 +313,13 @@ def convert_album_to_tag(dry_run: bool | None = None):
             logger.info(f"Processing album '{album_name}' ({album_id})")
 
             # Convert album name → hierarchical tag
-            hierarchical_tag = find_hierarchical_tag(album_name, mapping)
+            hierarchical_tag = mapped_by_album.get(album_id, album_name)
+
+            if leaf_only_tagging and hierarchical_tag in non_leaf_paths:
+                logger.info(
+                    f"Skipping album '{album_name}' because mapped tag '{hierarchical_tag}' has child paths."
+                )
+                continue
 
             logger.info(f"Mapped album '{album_name}' → tag '{hierarchical_tag}'")
 

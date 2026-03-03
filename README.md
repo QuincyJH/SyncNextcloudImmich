@@ -78,6 +78,7 @@ cp config/cron.example config/cron
 - `immich_file_sync.py`: Upload files from Nextcloud datasets to Immich via `immich-go`.
 	-e IMMICH_SERVER=https://immich.example.com \
 	-e LOG_LEVEL=INFO \
+	-e LEAF_ONLY_TAGGING=true \
 	-v $(pwd)/config:/config \
 	immich-sync:local album-sync
 
@@ -135,6 +136,7 @@ bash scripts/get-immich-go.sh --version latest --output-dir tools/immich-go
 ## Environment & Config
 
 - Immich server: `IMMICH_SERVER=https://immich.example.com`
+- Hierarchy behavior: `LEAF_ONLY_TAGGING=true` (default) to apply only leaf mapped tags; set `false` to also apply parent mapped tags
 - Nextcloud DB: `NEXTCLOUD_DB_HOST`, `NEXTCLOUD_DB_PORT`, `NEXTCLOUD_DB_NAME`, `NEXTCLOUD_DB_USER`, `NEXTCLOUD_DB_PASSWORD`
 - Paths in container:
 	- Config directory: `/config`
