@@ -61,30 +61,45 @@ def get_all_tags(immich_url, api_key):
     r.raise_for_status()
     return r.json()
 
-
-def create_tag(immich_url, api_key, name, parent_id=None, dry_run=False):
-    """Create a tag by name, optionally under a parentId (hierarchical)."""
+def _find_existing_tag_id(immich_url, api_key, tag_name, parent_id=None):
     headers = immich_headers(api_key)
-    payload = {"name": name}
+    r = requests.get(f"{immich_url}/api/tags", headers=headers, timeout=30)
+    if r.status_code != 200:
+        return None
+
+    for t in r.json() or []:
+        name = t.get("name")
+        pid = t.get("parentId", t.get("parentTagId"))
+        if name == tag_name and (pid == parent_id or (pid is None and parent_id is None)):
+            return t.get("id")
+    return None
+
+
+def create_tag(immich_url, api_key, tag_name, parent_id=None, dry_run=False):
+    if dry_run:
+        logger.info(f"[DRY-RUN] Would create tag '{tag_name}' (parent={parent_id})")
+        return None
+
+    headers = immich_headers(api_key)
+    payload = {"name": tag_name}
     if parent_id:
         payload["parentId"] = parent_id
 
-    if dry_run:
-        logger.info(f"DRY RUN: Would create tag '{name}' parentId={parent_id}")
-        # Return a synthetic id to allow downstream logic to proceed
-        return f"dryrun:{parent_id or 'root'}:{name}"
+    r = requests.post(f"{immich_url}/api/tags", headers=headers, json=payload, timeout=30)
 
-    r = requests.post(f"{immich_url}/api/tags", headers=headers, json=payload)
+    if r.status_code in (200, 201):
+        return r.json().get("id")
 
-    # If tag already exists, resolve it by name + parentId
-    if r.status_code == 400:
-        existing = get_all_tags(immich_url, api_key)
-        for t in existing:
-            if t.get("value") == name and t.get("parentId") == parent_id:
-                return t["id"]
-        raise requests.HTTPError(
-            f"Failed to create tag '{name}': {r.text}", response=r
-        )
+    if r.status_code == 400 and "already exists" in (r.text or "").lower():
+        existing_id = _find_existing_tag_id(immich_url, api_key, tag_name, parent_id)
+        if existing_id:
+            logger.info(f"Tag '{tag_name}' already exists; using existing id {existing_id}")
+            return existing_id
+
+    raise requests.HTTPError(
+        f"Failed to create tag '{tag_name}': {r.text}",
+        response=r,
+    )
 
     r.raise_for_status()
     return r.json()["id"]
