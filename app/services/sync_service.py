@@ -271,6 +271,15 @@ def add_assets_to_album(immich_url, immich_token, album_id, asset_ids):
     return r.status_code, r.text
 
 
+def remove_assets_from_album(immich_url, immich_token, album_id, asset_ids):
+    if not asset_ids:
+        return 200, "No assets to remove"
+    headers = immich_headers(immich_token)
+    data = {"ids": asset_ids}
+    r = requests.delete(f"{immich_url}/api/albums/{album_id}/assets", headers=headers, json=data)
+    return r.status_code, r.text
+
+
 def delete_album(immich_url, immich_token, album_id):
     headers = immich_headers(immich_token)
     r = requests.delete(f"{immich_url}/api/albums/{album_id}", headers=headers)
@@ -466,22 +475,20 @@ def copy_nextcloud_tags_to_immich(dry_run=None):
                     logger.info(f"[{username}]-{tag_name} Added {len(to_add)} assets → '{tag_name}' (status {status})")
 
             # 7. Apply removals
-            for asset_id in to_remove:
+            if to_remove:
                 if effective_dry_run:
-                    logger.info(f"[{username}]-{tag_name} DRY RUN: Would remove asset {asset_id} from '{tag_name}'")
-                    continue
-
-                del_resp = requests.delete(
-                    f"{immich_url}/api/albums/{album_id}/assets/{asset_id}",
-                    headers=headers
-                )
-                if del_resp.status_code in (200, 204):
-                    logger.info(f"[{username}]-{tag_name} Removed asset {asset_id} from '{tag_name}'")
+                    logger.info(f"[{username}]-{tag_name} DRY RUN: Would remove {len(to_remove)} assets from '{tag_name}'")
                 else:
-                    logger.error(
-                        f"[{username}]-{tag_name} Failed to remove asset {asset_id} from '{tag_name}': "
-                        f"{del_resp.status_code} {del_resp.text}"
+                    status, resp = remove_assets_from_album(
+                        immich_url, immich_token, album_id, list(to_remove)
                     )
+                    if status in (200, 204):
+                        logger.info(f"[{username}]-{tag_name} Removed {len(to_remove)} assets from '{tag_name}'")
+                    else:
+                        logger.error(
+                            f"[{username}]-{tag_name} Failed to remove {len(to_remove)} assets from '{tag_name}': "
+                            f"{status} {resp}"
+                        )
 
         # -----------------------------
         # DELETE ALBUMS NOT IN NEXTCLOUD TAG LIST
