@@ -1,5 +1,4 @@
-from app.services import sync_service_refactored as sync_service
-import logging
+from app.services import sync_service
 from fastapi import APIRouter
 from typing import Optional
 
