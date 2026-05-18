@@ -2,12 +2,7 @@
 
 Containerized tools to sync Nextcloud files and tags with Immich.
 
-## Contents
-- `nextcloud_immich_album_sync.py`: Sync Immich albums to mirror Nextcloud system tags (uses Postgres).
-- `immich_album_tag_sync.py`: Apply hierarchical Immich tags to assets based on album names.
-- `nextcloud_immich_file_sync.sh`: Upload files from Nextcloud datasets to Immich via `immich-go`.
-
-## Quick Start (Docker)
+## Getting Started
 
 1) Build the image
 
