@@ -1,32 +1,27 @@
 """
-Proposed refactor of `copy_nextcloud_tags_to_immich` and its helpers.
+Sync service.
 
-This file is for review, not yet wired into the app. It leaves
-`sync_files_to_cloud` and the file-upload path in the original
-`sync_service.py` untouched.
+Contains two entry points used by the API routers:
 
-Key changes vs. the original:
+  * `sync_files_to_cloud`           — uploads each user's Nextcloud folder to
+                                       Immich via the `immich-go` binary.
+  * `copy_nextcloud_tags_to_immich` — mirrors Nextcloud system tags into Immich
+                                       albums (optimized: one asset index + one
+                                       SQL pull per user, parallel per-tag work).
+
+Optimized tag-sync notes:
 
   1. Build a single in-memory index of Immich assets per user, keyed by
-     checksum / (filename, size) / filename. The per-file lookup now does
-     ZERO HTTP calls instead of 1-2 calls each.
-
-  2. Fetch all (tag_id, path, checksum, size) rows for a user in ONE SQL
-     query using `systemtagid = ANY(%s)`, instead of one query per tag.
-
-  3. Fetch the Immich album list ONCE per user (was: once per tag inside
-     `get_or_create_album`), and reuse it for the stale-album cleanup
-     pass at the end.
-
-  4. Use a `requests.Session` with a larger connection pool so we stop
-     paying TCP+TLS setup on every call.
-
-  5. Parallelize per-tag work (lookup + PUT/DELETE) with a thread pool.
-     Safe because each tag touches a different album.
-
-Expected effect: for a library with ~10k tagged assets and ~50 tags,
-wall-clock drops from "hours" to "a couple of minutes" — dominated by
-the single index build instead of N*M round trips.
+     checksum / (filename, size) / filename. The per-file lookup does ZERO
+     HTTP calls instead of 1-2 each.
+  2. Fetch all (tag_id, path, checksum, size) rows for a user in ONE SQL query
+     using `systemtagid = ANY(%s)`, instead of one query per tag.
+  3. Fetch the Immich album list ONCE per user and reuse it for the
+     stale-album cleanup pass at the end.
+  4. Use a `requests.Session` with a larger connection pool so we stop paying
+     TCP+TLS setup on every call.
+  5. Parallelize per-tag work (lookup + PUT/DELETE) with a thread pool. Safe
+     because each tag touches a different album.
 
 Tunables (env vars):
   IMMICH_PAGE_SIZE    default 1000   page size when indexing assets
@@ -37,32 +32,171 @@ Tunables (env vars):
 from __future__ import annotations
 
 import os
+import sys
+import subprocess
+import shutil
+import logging
 import json
 import base64
-import logging
+from logging.handlers import RotatingFileHandler
+from datetime import datetime, timezone
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import unquote
 
-import psycopg
 import requests
 from requests.adapters import HTTPAdapter
+import psycopg
 
-# Reuse existing config/logger/DB constants and the unchanged helper.
-from app.services.sync_service import (
-    CONFIG_FILE,
-    DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME,
-    logger,
-    get_system_tags_db,
-)
+CONFIG_FILE = os.environ.get("CONFIG_FILE", "/config/user_config.json")
+LOGFILE = os.environ.get("LOGFILE", "/config/immich_file_sync.log")
+LOG_TO_FILE = os.environ.get("LOG_TO_FILE", "false").lower() in ("1", "true", "yes")
+LOG_LEVEL = getattr(logging, os.environ.get("LOG_LEVEL", "INFO"))
 
-# ---------------------------------------------------------------------------
-# Tunables
-# ---------------------------------------------------------------------------
+# -----------------------------
+# DATABASE SETTINGS
+# -----------------------------
+
+DB_HOST = os.environ.get("NEXTCLOUD_DB_HOST", "nextcloud-db")
+DB_PORT = int(os.environ.get("NEXTCLOUD_DB_PORT", "5432"))
+DB_USER = os.environ.get("NEXTCLOUD_DB_USER", "nextcloud")
+DB_PASSWORD = os.environ.get("NEXTCLOUD_DB_PASSWORD", "")
+DB_NAME = os.environ.get("NEXTCLOUD_DB_NAME", "nextcloud")
+
+# -----------------------------
+# Tunables (optimized tag sync)
+# -----------------------------
 
 IMMICH_PAGE_SIZE  = int(os.environ.get("IMMICH_PAGE_SIZE", "1000"))
 ALBUM_PARALLELISM = int(os.environ.get("ALBUM_PARALLELISM", "8"))
 HTTP_POOL_SIZE    = int(os.environ.get("HTTP_POOL_SIZE", "16"))
+
+logger = logging.getLogger("ImmichFileSync")
+logger.setLevel(LOG_LEVEL)
+fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+console = logging.StreamHandler(sys.stdout)
+console.setFormatter(fmt)
+logger.addHandler(console)
+if LOG_TO_FILE:
+    file_handler = RotatingFileHandler(LOGFILE, maxBytes=5*1024*1024, backupCount=3)
+    file_handler.setFormatter(fmt)
+    logger.addHandler(file_handler)
+
+
+# ---------------------------------------------------------------------------
+# FILE UPLOAD (immich-go)
+# ---------------------------------------------------------------------------
+
+def sync_files_to_cloud(dry_run=None):
+    with open(CONFIG_FILE, "r") as f:
+        users = json.load(f)
+
+    for user in users:
+        nextcloud_file_path = user['nextcloud_file_path']
+
+        nextcloud_username = user['nextcloud_username']
+        immich_url = user['immich_url']
+        immich_token = user['immich_token']
+        effective_dry_run = user.get("dry_run", False) if dry_run is None else dry_run
+
+        if effective_dry_run:
+            logger.info(f"[{nextcloud_username}] DRY RUN: simulating upload from {nextcloud_file_path} → Immich")
+        else:
+            logger.info(f"[{nextcloud_username}] Uploading files from {nextcloud_file_path} → Immich")
+        start = datetime.now(timezone.utc)
+        rc = run_immich_go_upload(immich_url, immich_token, nextcloud_file_path, dry_run=effective_dry_run)
+        end = datetime.now(timezone.utc)
+        if rc == 0:
+            if effective_dry_run:
+                log = f"[{nextcloud_username}] Dry run complete. Elapsed: {end - start}"
+            else:
+                log = f"[{nextcloud_username}] Finished upload. Elapsed: {end - start}"
+            logger.info(log)
+        else:
+            log = f"[{nextcloud_username}] Upload failed with code {rc}"
+            logger.error(log)
+
+
+def run_immich_go_upload(server, api_key, folder, dry_run=False):
+    immich_go_bin = os.environ.get("IMMICH_GO_BIN", "immich-go")
+    if not dry_run and shutil.which(immich_go_bin) is None:
+        logger.error(
+            "immich-go binary not found. Set IMMICH_GO_BIN or mount the binary to /usr/local/bin/immich-go in the container."
+        )
+        return 127
+
+    cmd = [
+        immich_go_bin, "upload", "from-folder",
+        "--server", server,
+        "--api-key", api_key,
+        "--no-ui=true",
+        folder,
+    ]
+    if dry_run:
+        logger.info(f"DRY RUN: Would execute: {' '.join(cmd)}")
+        return 0
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        logger.error(
+            f"immich-go executable '{immich_go_bin}' was not found at runtime."
+        )
+        return 127
+    if result.returncode != 0:
+        logger.error(f"immich-go failed (rc={result.returncode}): {result.stderr.strip()}")
+    else:
+        if result.stdout:
+            logger.info(result.stdout.strip())
+    return result.returncode
+
+
+# ---------------------------------------------------------------------------
+# DB HELPERS
+# ---------------------------------------------------------------------------
+
+def run_db_query(sql, params=None):
+    """
+    Execute a SQL query against Nextcloud Postgres and return rows.
+    Uses psycopg with env-provided connection settings.
+    """
+    try:
+        with psycopg.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            dbname=DB_NAME,
+            connect_timeout=10,
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params or ())
+                return cur.fetchall()
+    except Exception as e:
+        logger.error(f"DB query failed: {e}")
+        return []
+
+
+def get_system_tags_db():
+    """
+    Return dict {tag_id: tag_name} from oc_systemtag.
+    """
+    sql = "SELECT id, name FROM oc_systemtag;"
+    rows = run_db_query(sql)
+    tags = {}
+
+    if not rows:
+        logger.warning("No system tags returned from DB.")
+        return tags
+
+    for tid, name in rows:
+        try:
+            tid_int = int(tid)
+        except Exception:
+            continue
+        name = name or f"Tag-{tid_int}"
+        tags[tid_int] = name
+
+    return tags
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +415,7 @@ def current_album_assets(session, immich_url, album_id):
 
 
 # ---------------------------------------------------------------------------
-# STEP 4: refactored entry point
+# STEP 4: tag → album sync entry point
 # ---------------------------------------------------------------------------
 
 def copy_nextcloud_tags_to_immich(dry_run=None):

@@ -1,67 +1,202 @@
 """
-Proposed refactor of `convert_album_to_tag` (the album → hierarchical tag
-sync). Side-by-side with `immich_service.py`; nothing is wired up yet.
+Immich album → hierarchical tag sync.
 
-Key changes vs. the original:
+Entry points used by the API router:
 
-  1. Single `requests.Session` per user with connection pooling — no more
-     fresh TCP+TLS handshake on every API call.
+  * `convert_album_to_tag` — maps each Immich album name to a hierarchical tag
+                             (via mapping.json) and applies it to the album's
+                             assets. Optimized: one session per user, hierarchy
+                             ensured up-front, per-album work parallelized, and
+                             standalone-leaf removal done in one bulk call.
+  * `clear_all_tags`       — deletes every tag from each configured account
+                             (child-first).
 
-  2. Tag hierarchy is ensured up-front in ONE pre-pass over the set of
-     distinct hierarchical paths across all albums. After that, the
-     per-album loop only has to look up tag IDs — it never mutates
-     `path_map` — which makes it safe to parallelize.
+Optimized convert notes:
 
-  3. Per-album work (fetch assets → apply tag → drop standalone leaf)
-     runs in a thread pool (`ALBUM_PARALLELISM`, default 8).
-
-  4. Bulk removal of the standalone leaf tag from assets via
-     `DELETE /api/tags/{tag_id}/assets` with `{"ids": [...]}` body —
-     one request per standalone tag per album instead of one per asset.
-
-  5. `create_tag`'s collision fallback no longer refetches the whole tag
-     list on every conflict. It refreshes once per run and reuses.
+  1. Single `requests.Session` per user with connection pooling — no fresh
+     TCP+TLS handshake on every API call.
+  2. Tag hierarchy is ensured up-front in ONE pre-pass over the set of distinct
+     hierarchical paths across all albums. After that the per-album loop only
+     looks up tag IDs — it never mutates `path_map` — so it's safe to
+     parallelize.
+  3. Per-album work (fetch assets → apply tag → drop standalone leaf) runs in a
+     thread pool (`ALBUM_PARALLELISM`, default 8).
+  4. Bulk removal of the standalone leaf tag via
+     `DELETE /api/tags/{tag_id}/assets` with `{"ids": [...]}` — one request per
+     standalone tag per album instead of one per asset.
+  5. `_create_tag`'s collision fallback refreshes the tag list once per run and
+     reuses it instead of refetching on every conflict.
 
 Tunables (env vars):
   ALBUM_PARALLELISM   default 8    threads used for per-album sync
   HTTP_POOL_SIZE      default 16   requests connection pool size
-
-Expected effect: for a library with lots of albums (especially many small
-ones), wall-clock should drop roughly proportional to ALBUM_PARALLELISM,
-plus a one-time saving from collapsing the per-asset DELETE loop into one
-bulk call per album.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
 import requests
 from requests.adapters import HTTPAdapter
 
-# Reuse everything that's already correct in the original module.
-from app.services.immich_service import (
-    CONFIG_FILE,
-    MAPPING_FILE,
-    LEAF_ONLY_TAGGING_DEFAULT,
-    logger,
-    load_mapping,
-    find_hierarchical_tag,
-    _build_tag_maps,
-    _tag_parent_id,
-    _as_bool,
-)
+# -----------------------------
+# CONFIG
+# -----------------------------
+# Allow overriding config paths via env; default to /config inside container
+CONFIG_FILE = os.environ.get("CONFIG_FILE", os.path.join("/config", "user_config.json"))
+MAPPING_FILE = os.environ.get("MAPPING_FILE", os.path.join("/config", "mapping.json"))
+LOGFILE = os.environ.get("LOGFILE", os.path.join("/config", "immich_album_tag_sync.log"))
+LEAF_ONLY_TAGGING_DEFAULT = os.environ.get("LEAF_ONLY_TAGGING", "true").lower() in ("1", "true", "yes", "on")
 
-# ---------------------------------------------------------------------------
+logger = logging.getLogger("ImmichAlbumTagSync")
+logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO")))
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+# Console logging for container use
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
+# Optional file logging
+if os.environ.get("LOG_TO_FILE", "false").lower() in ("1", "true", "yes"):
+    file_handler = RotatingFileHandler(LOGFILE, maxBytes=5*1024*1024, backupCount=3)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+
+# -----------------------------
 # Tunables
-# ---------------------------------------------------------------------------
+# -----------------------------
 
 ALBUM_PARALLELISM = int(os.environ.get("ALBUM_PARALLELISM", "8"))
 HTTP_POOL_SIZE    = int(os.environ.get("HTTP_POOL_SIZE", "16"))
+
+
+# -----------------------------
+# Tag-shape helpers (HTTP-free)
+# -----------------------------
+
+def _tag_name(tag):
+    return tag.get("value") or tag.get("name")
+
+
+def _tag_parent_id(tag):
+    return tag.get("parentId") or tag.get("parentTagId")
+
+
+def _build_tag_maps(tags):
+    """
+    Build helpful maps:
+      - id_index: {id: tag}
+      - path_map: {"Parent/Child": id}
+      - name_index: {value: [tag, ...]}
+    """
+    id_index = {t["id"]: t for t in tags}
+    name_index = {}
+    for t in tags:
+        tag_name = _tag_name(t)
+        if tag_name:
+            name_index.setdefault(tag_name, []).append(t)
+
+    def _path_for(tag):
+        parts = []
+        cur = tag
+        while cur:
+            parts.append(_tag_name(cur))
+            pid = _tag_parent_id(cur)
+            cur = id_index.get(pid)
+        return "/".join(reversed(parts))
+
+    path_map = {_path_for(t): t["id"] for t in tags}
+    return id_index, path_map, name_index
+
+
+def _as_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _normalize_label(value):
+    if value is None:
+        return ""
+    return " ".join(str(value).strip().split()).casefold()
+
+
+# -----------------------------
+# HIERARCHY MAPPING LOGIC
+# -----------------------------
+
+def load_mapping():
+    with open(MAPPING_FILE, "r") as f:
+        return json.load(f)
+
+
+def find_hierarchical_tag(album_name, mapping):
+    """
+    Given a flat album name, return the hierarchical tag path.
+    Supports unlimited nested dicts and {} leaf nodes.
+    """
+    normalized_album_name = _normalize_label(album_name)
+
+    for parent, children in mapping.items():
+        # Case 0: direct top-level match
+        if normalized_album_name == _normalize_label(parent):
+            return parent
+
+        # Case 1: children is a list
+        if isinstance(children, list):
+            for child in children:
+                if normalized_album_name == _normalize_label(child):
+                    return f"{parent}/{child}"
+
+        # Case 2: children is a nested dict
+        if isinstance(children, dict):
+            result = search_nested_mapping(album_name, parent, children)
+            if result:
+                return result
+
+    return album_name  # fallback: no hierarchy
+
+
+def search_nested_mapping(target, parent_path, subtree):
+    """
+    Recursively search nested mapping structures.
+    Supports:
+      - parent: [list]
+      - parent: { child: {}, child: { ... } }
+      - unlimited depth
+    Returns a full path for both intermediate nodes and leaves.
+    """
+    normalized_target = _normalize_label(target)
+
+    for key, value in subtree.items():
+
+        # Case 1: match node itself (works for both intermediate nodes and leaf nodes)
+        if _normalize_label(key) == normalized_target:
+            return f"{parent_path}/{key}"
+
+        # Case 2: nested dict
+        if isinstance(value, dict):
+            deeper = search_nested_mapping(target, f"{parent_path}/{key}", value)
+            if deeper:
+                return deeper
+
+        # Case 3: list of children
+        if isinstance(value, list):
+            for child in value:
+                if _normalize_label(child) == normalized_target:
+                    return f"{parent_path}/{key}/{child}"
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +216,7 @@ def _make_session(api_key: str) -> requests.Session:
 
 
 # ---------------------------------------------------------------------------
-# Small session-aware replacements for the original HTTP helpers
+# Session-aware HTTP helpers (used by convert_album_to_tag)
 # ---------------------------------------------------------------------------
 
 def _get_albums(session, immich_url):
@@ -201,7 +336,7 @@ def _bulk_remove_tag_from_assets(session, immich_url, tag_id, asset_ids, dry_run
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Entry point: album → hierarchical tag
 # ---------------------------------------------------------------------------
 
 def convert_album_to_tag(dry_run: bool | None = None):
@@ -338,3 +473,61 @@ def convert_album_to_tag(dry_run: bool | None = None):
                     logger.error(f"Album task crashed: {e}")
 
     logger.info("Album → hierarchical tag sync run complete.")
+
+
+# ---------------------------------------------------------------------------
+# Entry point: clear all tags
+# ---------------------------------------------------------------------------
+
+def clear_all_tags(dry_run: bool = False):
+    """Delete all tags from each configured Immich account (child-first)."""
+    with open(CONFIG_FILE, "r") as f:
+        configs = json.load(f)
+
+    for config in configs:
+        immich_url = config["immich_url"]
+        api_key = config["immich_token"]
+        session = _make_session(api_key)
+
+        tags = _get_all_tags(session, immich_url)
+        if not tags:
+            logger.info("No tags found to delete.")
+            continue
+
+        id_index = {t.get("id"): t for t in tags if t.get("id")}
+
+        def _depth(tag):
+            depth = 0
+            cur = tag
+            seen = set()
+            while cur:
+                tid = cur.get("id")
+                if tid in seen:
+                    break
+                seen.add(tid)
+                pid = _tag_parent_id(cur)
+                cur = id_index.get(pid)
+                if cur:
+                    depth += 1
+            return depth
+
+        # Delete deepest children first, then parents.
+        ordered_tags = sorted(tags, key=_depth, reverse=True)
+        logger.info(f"Found {len(ordered_tags)} tags. Deleting child-first order.")
+
+        deleted = 0
+        for tag in ordered_tags:
+            tag_id = tag.get("id")
+            if not tag_id:
+                continue
+            if dry_run:
+                logger.info(f"DRY RUN: Would delete tag {tag_id}")
+                deleted += 1
+                continue
+            r = session.delete(f"{immich_url}/api/tags/{tag_id}", timeout=30)
+            if r.status_code in (200, 204):
+                deleted += 1
+            else:
+                logger.warning(f"Failed to delete tag {tag_id}: {r.status_code} {r.text}")
+
+        logger.info(f"Deleted {deleted}/{len(ordered_tags)} tags.")
