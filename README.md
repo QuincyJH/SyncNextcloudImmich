@@ -1,170 +1,159 @@
 # SyncNextcloudImmich
 
-Containerized tools to sync Nextcloud files and tags with Immich.
+Containerized FastAPI service that syncs files and tags between **Nextcloud** and **Immich**.
+
+It exposes three jobs as HTTP endpoints, each meant to be triggered on a schedule (e.g. cron hitting the API):
+
+| Job | Endpoint | What it does |
+| --- | --- | --- |
+| **File upload** | `POST /sync/` | Uploads each user's Nextcloud folder into Immich via the external `immich-go` binary. |
+| **Tags → albums** | `POST /sync/copy-tags` | Reads Nextcloud **system tags** from the Nextcloud Postgres DB and mirrors them into Immich **albums** (one album per tag). |
+| **Albums → tags** | `POST /immich/` | Applies nested Immich **tags** to album assets, driven by `mapping.json`. |
+
+The two sync directions are inverse: Nextcloud tags become Immich albums; Immich albums become Immich hierarchical tags.
+
+> **Note:** all jobs run **synchronously** — the HTTP request blocks until the job finishes and returns a status string. There is no background queue.
 
 ## Getting Started
 
-1) Build the image
+### 1. Build the image
 
 ```bash
 docker build -t immich-sync:local .
 ```
-1.5) Download immich-go (Linux) and mount it (required for file uploads)
 
-`make install` now downloads and extracts `immich-go` automatically to `tools/immich-go/immich-go` if it is missing.
+### 2. Download `immich-go` (required for file uploads)
 
-You can also download/update it explicitly with:
+`immich-go` is a separate Go binary (not a Python package). It must be downloaded and mounted into the container.
 
-```bash
-make immich-go
-```
-
-Pin a specific release if `latest` has issues:
+`make install` downloads it automatically to `tools/immich-go/immich-go` if missing. You can also fetch it explicitly:
 
 ```bash
-make immich-go VERSION=v0.108.0
+make immich-go                    # latest
+make immich-go VERSION=v0.108.0   # pin a release
 ```
 
-On Windows PowerShell, you can also fetch the latest Linux binary manually:
+Manually, per platform:
 
 ```powershell
 pwsh scripts/get-immich-go.ps1 -Version latest -OutputDir tools/immich-go
 ```
 
-On Linux/macOS:
-
 ```bash
 bash scripts/get-immich-go.sh --version latest --output-dir tools/immich-go
 ```
 
-Then enable the optional volume in `docker-compose.yml`:
+If GitHub rate-limits the download, set a token first (`$env:GITHUB_TOKEN` / `export GITHUB_TOKEN=`).
 
-```
-	volumes:
-		- ./config:/config:rw
-		- ./tools/immich-go/immich-go:/usr/local/bin/immich-go:ro
-```
+The binary is mounted via `docker-compose.yml` to `/tools/immich-go` and selected with `IMMICH_GO_BIN=/tools/immich-go/immich-go`.
 
-Alternatively, pass the mount to `docker run`:
+### 3. Prepare config
 
-```powershell
-docker run --rm \
-	-e IMMICH_SERVER=https://immich.example.com \
-	-v ${PWD}/tools/immich-go/immich-go:/usr/local/bin/immich-go:ro \
-	-v ${PWD}/config:/config \
-	immich-sync:local file-sync
-```
-
-
-2) Prepare config
-- Copy examples and edit values:
+Copy the examples in `config/` and edit values:
 
 ```bash
 cp config/user_config.example.json config/user_config.json
 cp config/mapping.example.json config/mapping.json
-cp config/upload_map.example.txt config/upload_map.txt
-cp config/cron.example config/cron
 ```
 
-3) Run one-shot jobs
+- **`user_config.json`** — JSON **array of users**. Every job loops over all users, so one deployment can serve multiple accounts/servers. Per-user keys: `immich_url`, `immich_token`, `nextcloud_username`, `nextcloud_file_path`, `dry_run`, `whitelist_albums` (albums never deleted as "stale" during tag sync), and optional `leaf_only_tagging`.
+- **`mapping.json`** — album-name → nested-tag hierarchy for the albums→tags job. Supports arbitrarily nested dicts and `[list]` leaves. Matching is case- and whitespace-insensitive.
 
-```bash
-# Album → hierarchical tag sync
-- `immich_file_sync.py`: Upload files from Nextcloud datasets to Immich via `immich-go`.
-	-e IMMICH_SERVER=https://immich.example.com \
-	-e LOG_LEVEL=INFO \
-	-e LEAF_ONLY_TAGGING=true \
-	-v $(pwd)/config:/config \
-	immich-sync:local album-sync
+Nextcloud DB credentials are supplied via environment variables (see below), **not** config files.
 
-# Nextcloud → Immich album sync (requires DB access)
-docker run --rm \
-	-e NEXTCLOUD_DB_HOST=nextcloud-db.local \
-	-e NEXTCLOUD_DB_PORT=5432 \
-	-e NEXTCLOUD_DB_NAME=nextcloud \
-	-e NEXTCLOUD_DB_USER=nextcloud \
-	-e NEXTCLOUD_DB_PASSWORD=secret \
-	-v $(pwd)/config:/config \
-	immich-sync:local tag-sync
-
-# File uploads via immich-go (mount Nextcloud datasets read-only)
-docker run --rm \
-	-e IMMICH_SERVER=https://immich.example.com \
-	-v /path/to/cloud/data/User1/files:/data/nextcloud/User1:ro \
-	-v /path/to/cloud/data/User2/files:/data/nextcloud/User2:ro \
-	-v $(pwd)/config:/config \
-	immich-sync:local file-sync
-
-# Healthcheck
-docker run --rm \
-	-e IMMICH_SERVER=https://immich.example.com \
-	-e NEXTCLOUD_DB_HOST=nextcloud-db.example.local \
-	-e NEXTCLOUD_DB_NAME=nextcloud \
-	-e NEXTCLOUD_DB_USER=nextcloud \
-	-e NEXTCLOUD_DB_PASSWORD=secret \
-	-v $(pwd)/config:/config \
-	immich-sync:local healthcheck
-```
-
-## Compose Scheduler
-
-Edit `docker-compose.yml` to mount datasets and `/config`, then start:
+### 4. Run
 
 ```bash
 docker compose up -d --build
 ```
 
-The service runs `supercronic` using `/config/cron` to schedule the three commands.
+The service listens on port `8000`. `make start` runs `docker compose up --build --watch`, which live-reloads on edits to `app/` and `config/`.
 
-Tip: If GitHub API rate limits you while downloading `immich-go`, set a token:
-
-```powershell
-$env:GITHUB_TOKEN = "ghp_..."
-pwsh scripts/get-immich-go.ps1 -Version latest -OutputDir tools/immich-go
-```
+To run the API without Docker:
 
 ```bash
-export GITHUB_TOKEN="ghp_..."
-bash scripts/get-immich-go.sh --version latest --output-dir tools/immich-go
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+## Triggering jobs
+
+All jobs are `POST` requests. `dry_run=true` simulates without writing; if omitted, each user's `dry_run` config value applies.
+
+```bash
+# File upload
+curl -X POST "http://localhost:8000/sync/?dry_run=true"
+
+# Nextcloud tags → Immich albums
+curl -X POST "http://localhost:8000/sync/copy-tags?dry_run=true"
+
+# Immich albums → hierarchical tags
+curl -X POST "http://localhost:8000/immich/"
+
+# Delete ALL Immich tags (destructive)
+curl -X POST "http://localhost:8000/immich/clear?dry_run=true"
+
+# Health
+curl "http://localhost:8000/health/"
+curl "http://localhost:8000/health/dependencies"   # checks immich-go availability
+```
+
+A [Bruno](https://www.usebruno.com/) collection for exercising these endpoints lives in the `SyncNextcloudImmich/` directory.
+
+## Scheduling
+
+Point any scheduler at the running container's endpoints. Example crontab (UTC assumed inside the container; set `TZ` to change):
+
+```cron
+# Albums → hierarchical tags, hourly
+0 * * * * curl -fsS -X POST http://localhost:8000/immich/
+# Nextcloud tags → Immich albums, daily at 02:00
+0 2 * * * curl -fsS -X POST http://localhost:8000/sync/copy-tags
+# File uploads, daily at 03:00
+0 3 * * * curl -fsS -X POST http://localhost:8000/sync/
 ```
 
 ## Environment & Config
 
-- Immich server: `IMMICH_SERVER=https://immich.example.com`
-- Hierarchy behavior: `LEAF_ONLY_TAGGING=true` (default) to apply only leaf mapped tags; set `false` to also apply parent mapped tags
-- Nextcloud DB: `NEXTCLOUD_DB_HOST`, `NEXTCLOUD_DB_PORT`, `NEXTCLOUD_DB_NAME`, `NEXTCLOUD_DB_USER`, `NEXTCLOUD_DB_PASSWORD`
-- Paths in container:
-	- Config directory: `/config`
-	- Optional cache: `/cache`
-- Files in `/config`:
-	- `user_config.json`: per-user Immich credentials, whitelist, dry-run
-	- `mapping.json`: album → hierarchical tag mapping
-	- `upload_map.txt`: lines `NEXTCLOUD_PATH IMMICH_API_KEY`
-	- `cron`: supercronic schedule file
+- **Immich:** `IMMICH_SERVER=https://immich.example.com`
+- **immich-go:** `IMMICH_GO_BIN` (path to the binary; default `immich-go` on `PATH`)
+- **Nextcloud DB:** `NEXTCLOUD_DB_HOST`, `NEXTCLOUD_DB_PORT` (default 5432), `NEXTCLOUD_DB_NAME`, `NEXTCLOUD_DB_USER`, `NEXTCLOUD_DB_PASSWORD`
+- **Tag hierarchy:** `LEAF_ONLY_TAGGING=true` (default) applies only leaf mapped tags; set `false` to also apply parent mapped tags
+- **Logging:** `LOG_LEVEL` (default `INFO`); `LOG_TO_FILE=true` also writes to `/config/*.log`
+- **Performance tunables:** `IMMICH_PAGE_SIZE` (1000), `ALBUM_PARALLELISM` (8), `HTTP_POOL_SIZE` (16)
+- **Container paths:** config directory `/config`, optional cache `/cache`
 
-# Optional path rewrite if your mapping uses host paths
-docker run --rm \
-  -e IMMICH_SERVER=https://immich.example.com \
-  -e PATH_REWRITE_FROM=/path/to/cloud/data \
-  -e PATH_REWRITE_TO=/data/nextcloud \
-  -v /path/to/cloud/data/User1/files:/data/nextcloud/User1:ro \
-  -v /path/to/cloud/data/User2/files:/data/nextcloud/User2:ro \
-  -v $(pwd)/config:/config \
-  immich-sync:local file-sync
+Copy `.env.example` to `.env` for `docker-compose.yml` variable substitution.
+
+## Healthcheck script
+
+`app/healthcheck.py` is a standalone script (run directly, not via the API) that verifies Immich reachability for each configured user and, if DB env vars are set, Nextcloud DB connectivity:
+
+```bash
+python app/healthcheck.py
+```
 
 ## TrueNAS SCALE
 
-- Recommended: deploy via Apps and create three CronJobs (album-sync, tag-sync, file-sync) with the same image and required volumes/envs.
-- Alternative: deploy the Compose stack above via the Docker service.
+- **Recommended:** deploy via Apps as a long-running service, then create CronJobs (or external cron) that `curl` the endpoints on a schedule.
+- **Alternative:** deploy the Compose stack above via the Docker service.
+
+## CI / releases
+
+`.github/workflows/publish_image.yml` builds and pushes a Docker image to **ghcr.io** on every push to `main` (tagged `latest`) and on published GitHub releases (tagged with the version, `v` prefix stripped).
 
 ## Notes
-- Logs are written to stdout; set `LOG_TO_FILE=true` to also write to `/config/*.log`.
-- `nextcloud_immich_album_sync.py` uses direct Postgres access (no `docker exec`). Ensure network connectivity and credentials are valid.
 
-for window:
-	install git
-	install chocolatey
-	install pipenv
-	ensure  C:\Program Files\Git\bin is added to PATH
-run make install
-run make start
+- `sync_service.copy_nextcloud_tags_to_immich` uses **direct Postgres access** to Nextcloud (no `docker exec`, no Nextcloud API). Ensure network connectivity and valid credentials, and that the schema matches Nextcloud's `oc_systemtag*` / `oc_filecache` / `oc_storages` tables.
+- Asset matching maps Nextcloud files to Immich assets by checksum → (filename, size) → unique filename.
+- Logs are written to stdout.
+
+### Windows local dev
+
+```
+install git
+install chocolatey
+install pipenv
+ensure C:\Program Files\Git\bin is on PATH
+make install
+make start
+```
