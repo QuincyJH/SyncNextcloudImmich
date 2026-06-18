@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SyncNextcloudImmich — Config Editor</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 1.25rem;
+           max-width: 920px; margin-inline: auto; }
+    h1 { font-size: 1.25rem; margin: 0 0 .75rem; }
+    .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: .75rem; }
+    .tabs { display: flex; gap: .25rem; margin-bottom: .5rem; }
+    .tab { padding: .4rem .9rem; border: 1px solid #8884; border-bottom: none;
+           border-radius: 6px 6px 0 0; cursor: pointer; background: #8881; }
+    .tab.active { background: #4f8cff22; border-color: #4f8cff; font-weight: 600; }
+    textarea { width: 100%; height: 60vh; font-family: ui-monospace, monospace;
+               font-size: 13px; padding: .6rem; border: 1px solid #8884; border-radius: 6px;
+               resize: vertical; }
+    input[type=password] { flex: 1; min-width: 180px; padding: .4rem .6rem;
+               border: 1px solid #8884; border-radius: 6px; font-family: inherit; }
+    button { padding: .45rem 1rem; border: 1px solid #4f8cff; background: #4f8cff;
+             color: #fff; border-radius: 6px; cursor: pointer; font-size: .9rem; }
+    button.secondary { background: transparent; color: inherit; border-color: #8886; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    #status { margin-top: .6rem; padding: .5rem .7rem; border-radius: 6px;
+              min-height: 1.2em; font-size: .9rem; white-space: pre-wrap; }
+    .ok { background: #22c55e22; }
+    .err { background: #ef444422; }
+    .warn { font-size: .82rem; opacity: .8; margin-bottom: .5rem; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Config Editor</h1>
+
+  <div class="row">
+    <input id="token" type="password" placeholder="X-Config-Token (CONFIG_API_TOKEN)" autocomplete="off" />
+    <label><input id="remember" type="checkbox" /> remember in this browser</label>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-target="mapping">mapping.json</div>
+    <div class="tab" data-target="user">user_config.json</div>
+  </div>
+
+  <div id="warn-user" class="warn hidden">
+    ⚠ This file contains Immich API tokens. Anyone viewing this screen can read them.
+  </div>
+
+  <textarea id="editor" spellcheck="false"></textarea>
+
+  <div class="row" style="margin-top:.6rem">
+    <button id="load">Load</button>
+    <button id="validate" class="secondary">Validate JSON</button>
+    <button id="save">Save</button>
+  </div>
+  <div id="status"></div>
+
+<script>
+const ENDPOINTS = {
+  mapping: "/config/mapping",
+  user:    "/config/user-config",
+};
+let activeTab = "mapping";
+const $ = (id) => document.getElementById(id);
+
+// Restore a remembered token.
+const saved = localStorage.getItem("configToken");
+if (saved) { $("token").value = saved; $("remember").checked = true; }
+
+function setStatus(msg, kind) {
+  const el = $("status");
+  el.textContent = msg;
+  el.className = kind || "";
+}
+
+function token() { return $("token").value.trim(); }
+
+function rememberMaybe() {
+  if ($("remember").checked) localStorage.setItem("configToken", token());
+  else localStorage.removeItem("configToken");
+}
+
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+  t.classList.add("active");
+  activeTab = t.dataset.target;
+  $("warn-user").classList.toggle("hidden", activeTab !== "user");
+  $("editor").value = "";
+  setStatus("Switched to " + (activeTab === "user" ? "user_config.json" : "mapping.json") + ". Click Load.", "");
+}));
+
+async function load() {
+  if (!token()) return setStatus("Enter the config token first.", "err");
+  rememberMaybe();
+  setStatus("Loading…", "");
+  try {
+    const r = await fetch(ENDPOINTS[activeTab], { headers: { "X-Config-Token": token() } });
+    const body = await r.json();
+    if (!r.ok) return setStatus("Error " + r.status + ": " + (body.detail || r.statusText), "err");
+    $("editor").value = JSON.stringify(body, null, 2);
+    setStatus("Loaded.", "ok");
+  } catch (e) { setStatus("Request failed: " + e.message, "err"); }
+}
+
+function parseEditor() {
+  try { return { ok: true, data: JSON.parse($("editor").value) }; }
+  catch (e) { return { ok: false, error: e.message }; }
+}
+
+function validate() {
+  const p = parseEditor();
+  if (!p.ok) return setStatus("Invalid JSON: " + p.error, "err");
+  setStatus("Valid JSON. (Server will check structure on save.)", "ok");
+}
+
+async function save() {
+  if (!token()) return setStatus("Enter the config token first.", "err");
+  const p = parseEditor();
+  if (!p.ok) return setStatus("Invalid JSON, not saving: " + p.error, "err");
+  rememberMaybe();
+  setStatus("Saving…", "");
+  try {
+    const r = await fetch(ENDPOINTS[activeTab], {
+      method: "PUT",
+      headers: { "X-Config-Token": token(), "Content-Type": "application/json" },
+      body: JSON.stringify(p.data),
+    });
+    const body = await r.json();
+    if (!r.ok) return setStatus("Save rejected (" + r.status + "): " + (body.detail || r.statusText), "err");
+    setStatus("Saved " + (body.file || "") + " ✓", "ok");
+  } catch (e) { setStatus("Request failed: " + e.message, "err"); }
+}
+
+$("load").addEventListener("click", load);
+$("validate").addEventListener("click", validate);
+$("save").addEventListener("click", save);
+</script>
+</body>
+</html>

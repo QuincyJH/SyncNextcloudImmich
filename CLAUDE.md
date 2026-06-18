@@ -23,6 +23,7 @@ Request flow is a thin three-layer stack:
 - `app/main.py` — entrypoint; wires CORS and mounts three routers under `/health`, `/sync`, `/immich`.
 - `app/server.py` — constructs the `FastAPI` app instance and OpenAPI tag metadata.
 - `app/routers/{health,sync,immich}.py` — thin HTTP handlers that immediately delegate to a service function. **Endpoints fire jobs synchronously and return a string status** (e.g. `"sync started"`); there is no background-task queue, so a long sync blocks the request.
+- `app/routers/config.py` + `app/services/config_service.py` — token-gated read/write of `mapping.json` and `user_config.json` so they can be edited via API instead of SFTP. `GET /ui` (route in `main.py`) serves `app/static/editor.html`, a dependency-free browser editor. Unlike the other routers, these are protected by `require_config_token` (the `X-Config-Token` header must equal `CONFIG_API_TOKEN`; if that env var is unset the whole config API returns 503 — fails closed because it can read/write Immich tokens). Writes are validated then written atomically (temp file + `os.replace`) so a bad or interrupted save can't corrupt the live config.
 - `app/services/sync_service.py` — jobs 1 and 2 (file upload + Nextcloud-tag → Immich-album).
 - `app/services/immich_service.py` — job 3 (Immich-album → hierarchical-tag) plus `clear_all_tags`.
 - `app/healthcheck.py` — standalone script (run directly, not via the API) that verifies Immich reachability per user and optional Nextcloud DB connectivity.
@@ -72,6 +73,11 @@ curl -X POST "http://localhost:8000/sync/copy-tags?dry_run=true"  # Nextcloud ta
 curl -X POST "http://localhost:8000/immich/"                   # Immich albums → hierarchical tags
 curl -X POST "http://localhost:8000/immich/clear"              # delete ALL Immich tags (destructive)
 curl "http://localhost:8000/health/dependencies"               # check immich-go availability
+
+# Config editor API (token-gated). Browser editor at http://localhost:8000/ui
+curl -H "X-Config-Token: $CONFIG_API_TOKEN" "http://localhost:8000/config/mapping"
+curl -X PUT -H "X-Config-Token: $CONFIG_API_TOKEN" -H "Content-Type: application/json" \
+  -d @config/mapping.json "http://localhost:8000/config/mapping"
 ```
 
 The `SyncNextcloudImmich/` directory (note: same name as repo root) is a **Bruno** API collection — open it in Bruno to exercise the endpoints interactively. There is no automated test suite.
@@ -84,7 +90,7 @@ The `SyncNextcloudImmich/` directory (note: same name as repo root) is a **Bruno
 
 ## Key env vars
 
-`IMMICH_SERVER`, `IMMICH_GO_BIN`, `NEXTCLOUD_DB_{HOST,PORT,NAME,USER,PASSWORD}`, `LEAF_ONLY_TAGGING` (default true — apply only leaf mapped tags, skip parent duplication), `LOG_LEVEL`, `LOG_TO_FILE` (+ `LOGFILE`), and tunables `IMMICH_PAGE_SIZE`, `ALBUM_PARALLELISM`, `HTTP_POOL_SIZE`.
+`IMMICH_SERVER`, `IMMICH_GO_BIN`, `NEXTCLOUD_DB_{HOST,PORT,NAME,USER,PASSWORD}`, `LEAF_ONLY_TAGGING` (default true — apply only leaf mapped tags, skip parent duplication), `CONFIG_API_TOKEN` (shared secret for the `/config` endpoints + `/ui` editor; unset = config API disabled), `LOG_LEVEL`, `LOG_TO_FILE` (+ `LOGFILE`), and tunables `IMMICH_PAGE_SIZE`, `ALBUM_PARALLELISM`, `HTTP_POOL_SIZE`.
 
 ## CI / release
 

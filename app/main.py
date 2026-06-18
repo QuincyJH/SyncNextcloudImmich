@@ -1,7 +1,11 @@
 from app.server import app
+import os
 import uvicorn
-from app.routers import health, sync, immich
+from app.routers import health, sync, immich, config
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,5 +32,18 @@ app.include_router(
     tags=["immich"],
     responses={404: {"description": "Not Found"}},
 )
+app.include_router(
+    config.router,
+    prefix="/config",
+    tags=["config"],
+    responses={404: {"description": "Not Found"}},
+)
+
+
+@app.get("/ui", include_in_schema=False)
+def config_editor():
+    return FileResponse(os.path.join(STATIC_DIR, "editor.html"))
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

@@ -99,6 +99,24 @@ curl "http://localhost:8000/health/dependencies"   # checks immich-go availabili
 
 A [Bruno](https://www.usebruno.com/) collection for exercising these endpoints lives in the `SyncNextcloudImmich/` directory.
 
+## Editing config without SFTP
+
+Instead of pulling `mapping.json` / `user_config.json` over SFTP to edit them, the service exposes a small token-protected editor.
+
+1. Set a secret in your `.env`: `CONFIG_API_TOKEN=<a long random value>` (if unset, the config API is disabled and returns `503`).
+2. Open **`http://<host>:8000/ui`** in a browser, paste the token, and edit either file in the textarea. **Load** fetches the current file, **Validate JSON** checks syntax client-side, **Save** writes it.
+
+Saves are validated server-side (mapping must be nested objects / string-list leaves; user config must be an array with the required per-user keys) and written **atomically**, so a malformed or interrupted save can't corrupt the live file. The same operations are available directly:
+
+```bash
+curl -H "X-Config-Token: $CONFIG_API_TOKEN" http://localhost:8000/config/mapping
+curl -X PUT -H "X-Config-Token: $CONFIG_API_TOKEN" -H "Content-Type: application/json" \
+  -d @config/mapping.json http://localhost:8000/config/mapping
+# also: /config/user-config
+```
+
+> The user-config view exposes Immich API tokens. Keep `CONFIG_API_TOKEN` secret and the port off the public internet.
+
 ## Scheduling
 
 Point any scheduler at the running container's endpoints. Example crontab (UTC assumed inside the container; set `TZ` to change):
@@ -118,6 +136,7 @@ Point any scheduler at the running container's endpoints. Example crontab (UTC a
 - **immich-go:** `IMMICH_GO_BIN` (path to the binary; default `immich-go` on `PATH`)
 - **Nextcloud DB:** `NEXTCLOUD_DB_HOST`, `NEXTCLOUD_DB_PORT` (default 5432), `NEXTCLOUD_DB_NAME`, `NEXTCLOUD_DB_USER`, `NEXTCLOUD_DB_PASSWORD`
 - **Tag hierarchy:** `LEAF_ONLY_TAGGING=true` (default) applies only leaf mapped tags; set `false` to also apply parent mapped tags
+- **Config editor:** `CONFIG_API_TOKEN` — shared secret for the `/config` endpoints and `/ui` editor; if unset, that API is disabled
 - **Logging:** `LOG_LEVEL` (default `INFO`); `LOG_TO_FILE=true` also writes to `/config/*.log`
 - **Performance tunables:** `IMMICH_PAGE_SIZE` (1000), `ALBUM_PARALLELISM` (8), `HTTP_POOL_SIZE` (16)
 - **Container paths:** config directory `/config`, optional cache `/cache`

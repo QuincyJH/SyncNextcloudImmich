@@ -8,6 +8,7 @@ services:
       - TZ=UTC
       - LOG_LEVEL=INFO
       - IMMICH_GO_BIN=/tools/immich-go/immich-go
+      - CONFIG_API_TOKEN=${CONFIG_API_TOKEN}
       - IMMICH_SERVER=${IMMICH_SERVER}
       - NEXTCLOUD_DB_HOST=${NEXTCLOUD_DB_HOST}
       - NEXTCLOUD_DB_PORT=${NEXTCLOUD_DB_PORT:-5432}

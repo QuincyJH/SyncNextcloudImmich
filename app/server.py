@@ -13,6 +13,10 @@ tags_metadata = [
     {
         "name": "immich",
         "description": "Manages Immich related operations"
+    },
+    {
+        "name": "config",
+        "description": "Reads and writes mapping.json / user_config.json (token-protected)"
     }
 ]
 
