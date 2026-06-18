@@ -142,6 +142,10 @@ env/
 venv/
 ENV/
 env.bak/
+
+# Local config-editor smoke test scaffolding (not for commit)
+.devtest/
+_dev_config_server.py
 venv.bak/
 
 # Spyder project settings
