@@ -60,6 +60,53 @@ def read_user_config():
 
 
 # ---------------------------------------------------------------------------
+# Named mapping files (per-user mapping support)
+# ---------------------------------------------------------------------------
+
+def _config_dir():
+    return os.path.dirname(MAPPING_FILE) or "."
+
+
+def _safe_mapping_path(name):
+    """
+    Resolve a mapping filename to an absolute path inside the config dir,
+    rejecting anything that isn't a plain `*.json` basename. These endpoints
+    are token-gated but still write to disk, so we refuse path traversal
+    (`..`, absolute paths, subdirectories) and hidden/dotfiles outright.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ConfigValidationError("Mapping file name must be a non-empty string.")
+    base = os.path.basename(name)
+    if base != name or base.startswith(".") or not base.endswith(".json"):
+        raise ConfigValidationError(
+            f"Invalid mapping file name '{name}'. Use a plain '*.json' filename."
+        )
+    return os.path.join(_config_dir(), base)
+
+
+def list_mapping_files():
+    """
+    Names the editor can offer: the default mapping plus every distinct
+    `mapping_file` referenced by user_config (whether or not it exists yet).
+    """
+    names = {os.path.basename(MAPPING_FILE)}
+    for user in read_user_config():
+        mf = user.get("mapping_file") if isinstance(user, dict) else None
+        if isinstance(mf, str) and mf.strip():
+            names.add(os.path.basename(mf))
+    return sorted(names)
+
+
+def read_mapping_file(name):
+    return _read_json(_safe_mapping_path(name), {})
+
+
+def write_mapping_file(name, data):
+    validate_mapping(data)
+    _atomic_write_json(_safe_mapping_path(name), data)
+
+
+# ---------------------------------------------------------------------------
 # Validate
 # ---------------------------------------------------------------------------
 
@@ -107,6 +154,12 @@ def validate_user_config(data):
             raise ConfigValidationError(f"User entry #{i}: 'dry_run' must be true or false.")
         if "whitelist_albums" in user and not isinstance(user["whitelist_albums"], list):
             raise ConfigValidationError(f"User entry #{i}: 'whitelist_albums' must be a list.")
+        if "mapping_file" in user:
+            mf = user["mapping_file"]
+            if not isinstance(mf, str) or not mf.strip():
+                raise ConfigValidationError(
+                    f"User entry #{i}: 'mapping_file' must be a non-empty string."
+                )
 
 
 # ---------------------------------------------------------------------------

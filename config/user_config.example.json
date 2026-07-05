@@ -7,7 +7,8 @@
     "immich_url": "https://immich.example.com",
     "immich_token": "IMMICH_API_KEY_FOR_USER",
     "dry_run": false,
-    "whitelist_albums": ["Favorites", "Family"]
+    "whitelist_albums": ["Favorites", "Family"],
+    "mapping_file": "mapping-user1.json"
   },
   {
     "nextcloud_username": "User_2",

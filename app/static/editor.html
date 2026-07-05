@@ -41,8 +41,15 @@
   </div>
 
   <div class="tabs">
-    <div class="tab active" data-target="mapping">mapping.json</div>
+    <div class="tab active" data-target="mapping">mapping</div>
     <div class="tab" data-target="user">user_config.json</div>
+  </div>
+
+  <div id="mapping-file-row" class="row">
+    <label for="mappingFile">Mapping file:</label>
+    <select id="mappingFile" style="flex:1; min-width:180px; padding:.4rem .6rem;
+            border:1px solid #8884; border-radius:6px; font-family:inherit;"></select>
+    <button id="newMapping" class="secondary" type="button">+ New file…</button>
   </div>
 
   <div id="warn-user" class="warn hidden">
@@ -59,12 +66,16 @@
   <div id="status"></div>
 
 <script>
-const ENDPOINTS = {
-  mapping: "/config/mapping",
-  user:    "/config/user-config",
-};
 let activeTab = "mapping";
 const $ = (id) => document.getElementById(id);
+
+// Resolve the load/save endpoint for the active tab. The mapping tab targets a
+// specific named file so each Immich profile can carry its own album->tag rules.
+function endpoint() {
+  if (activeTab === "user") return "/config/user-config";
+  const name = $("mappingFile").value;
+  return "/config/mapping-file?name=" + encodeURIComponent(name);
+}
 
 // Restore a remembered token.
 const saved = localStorage.getItem("configToken");
@@ -88,16 +99,55 @@ document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () =>
   t.classList.add("active");
   activeTab = t.dataset.target;
   $("warn-user").classList.toggle("hidden", activeTab !== "user");
+  $("mapping-file-row").classList.toggle("hidden", activeTab !== "mapping");
   $("editor").value = "";
-  setStatus("Switched to " + (activeTab === "user" ? "user_config.json" : "mapping.json") + ". Click Load.", "");
+  if (activeTab === "mapping") refreshMappingFiles();
+  const label = activeTab === "user" ? "user_config.json" : ($("mappingFile").value || "a mapping file");
+  setStatus("Switched to " + label + ". Click Load.", "");
 }));
+
+// Populate the mapping-file dropdown from the server (default file + every file
+// referenced by user_config), keeping the current selection if still present.
+async function refreshMappingFiles() {
+  if (!token()) return;
+  try {
+    const r = await fetch("/config/mapping-files", { headers: { "X-Config-Token": token() } });
+    const body = await r.json();
+    if (!r.ok) return setStatus("Error " + r.status + ": " + (body.detail || r.statusText), "err");
+    const sel = $("mappingFile");
+    const prev = sel.value;
+    sel.innerHTML = "";
+    for (const name of body) {
+      const opt = document.createElement("option");
+      opt.value = name; opt.textContent = name;
+      sel.appendChild(opt);
+    }
+    if (body.includes(prev)) sel.value = prev;
+  } catch (e) { setStatus("Request failed: " + e.message, "err"); }
+}
+
+function newMappingFile() {
+  let name = prompt("New mapping file name (e.g. mapping-alice.json):", "mapping-.json");
+  if (!name) return;
+  name = name.trim();
+  if (!name.endsWith(".json")) name += ".json";
+  const sel = $("mappingFile");
+  if (![...sel.options].some(o => o.value === name)) {
+    const opt = document.createElement("option");
+    opt.value = name; opt.textContent = name;
+    sel.appendChild(opt);
+  }
+  sel.value = name;
+  $("editor").value = "{\n  \n}";
+  setStatus("New file '" + name + "'. Edit and Save to create it. Reference it via 'mapping_file' in user_config.json.", "");
+}
 
 async function load() {
   if (!token()) return setStatus("Enter the config token first.", "err");
   rememberMaybe();
   setStatus("Loading…", "");
   try {
-    const r = await fetch(ENDPOINTS[activeTab], { headers: { "X-Config-Token": token() } });
+    const r = await fetch(endpoint(), { headers: { "X-Config-Token": token() } });
     const body = await r.json();
     if (!r.ok) return setStatus("Error " + r.status + ": " + (body.detail || r.statusText), "err");
     $("editor").value = JSON.stringify(body, null, 2);
@@ -123,7 +173,7 @@ async function save() {
   rememberMaybe();
   setStatus("Saving…", "");
   try {
-    const r = await fetch(ENDPOINTS[activeTab], {
+    const r = await fetch(endpoint(), {
       method: "PUT",
       headers: { "X-Config-Token": token(), "Content-Type": "application/json" },
       body: JSON.stringify(p.data),
@@ -137,6 +187,10 @@ async function save() {
 $("load").addEventListener("click", load);
 $("validate").addEventListener("click", validate);
 $("save").addEventListener("click", save);
+$("newMapping").addEventListener("click", newMappingFile);
+
+// Prime the mapping-file dropdown if we already have a remembered token.
+if (token()) refreshMappingFiles();
 </script>
 </body>
 </html>

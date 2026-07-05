@@ -44,6 +44,28 @@ def put_mapping(data: dict = Body(...)):
     return {"status": "saved", "file": "mapping.json"}
 
 
+@router.get("/mapping-files", dependencies=[Depends(require_config_token)])
+def list_mapping_files():
+    return config_service.list_mapping_files()
+
+
+@router.get("/mapping-file", dependencies=[Depends(require_config_token)])
+def get_mapping_file(name: str):
+    try:
+        return config_service.read_mapping_file(name)
+    except config_service.ConfigValidationError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+
+
+@router.put("/mapping-file", dependencies=[Depends(require_config_token)])
+def put_mapping_file(name: str, data: dict = Body(...)):
+    try:
+        config_service.write_mapping_file(name, data)
+    except config_service.ConfigValidationError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    return {"status": "saved", "file": name}
+
+
 @router.get("/user-config", dependencies=[Depends(require_config_token)])
 def get_user_config():
     return config_service.read_user_config()

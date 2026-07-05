@@ -84,8 +84,9 @@ The `SyncNextcloudImmich/` directory (note: same name as repo root) is a **Bruno
 
 ## Config files (`/config`, gitignored — copy from `*.example`)
 
-- `user_config.json` — array of users: `immich_url`, `immich_token`, `nextcloud_username`, `nextcloud_file_path`, `dry_run`, `whitelist_albums` (albums never deleted as "stale"), optional `leaf_only_tagging`.
+- `user_config.json` — array of users: `immich_url`, `immich_token`, `nextcloud_username`, `nextcloud_file_path`, `dry_run`, `whitelist_albums` (albums never deleted as "stale"), optional `leaf_only_tagging`, optional `mapping_file`.
 - `mapping.json` — album-name → nested-tag hierarchy. Supports arbitrarily nested dicts and `[list]` leaves (see `mapping.example.json`). Matching is case/whitespace-insensitive (`_normalize_label`).
+- **Per-user mapping** — a user may set `mapping_file` (a plain `*.json` filename resolved against the config dir, or an absolute path) so that Immich profile gets its own album→tag rules instead of the shared `mapping.json`. Resolved per-run by `immich_service._resolve_mapping_path`. Tags are still server-scoped in Immich: two users pointing at the *same* Immich URL share the tag namespace regardless of mapping file, so true per-profile isolation means distinct Immich accounts. Named mapping files are managed via `GET /config/mapping-files`, `GET|PUT /config/mapping-file?name=<file>`, and the `/ui` editor's mapping-file dropdown.
 - DB credentials come from env vars (`NEXTCLOUD_DB_*`), not config files.
 
 ## Key env vars

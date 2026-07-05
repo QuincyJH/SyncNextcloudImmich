@@ -135,8 +135,27 @@ def _normalize_label(value):
 # HIERARCHY MAPPING LOGIC
 # -----------------------------
 
-def load_mapping():
-    with open(MAPPING_FILE, "r") as f:
+def _resolve_mapping_path(config):
+    """
+    Pick which mapping file this user's run should use.
+
+    A per-user `mapping_file` key lets each Immich profile carry its own
+    album -> tag rules; absent that, everyone falls back to the shared
+    MAPPING_FILE. A relative name is resolved against the config directory
+    (alongside user_config.json / mapping.json); an absolute path is used
+    as-is.
+    """
+    mapping_file = config.get("mapping_file")
+    if not mapping_file:
+        return MAPPING_FILE
+    if os.path.isabs(mapping_file):
+        return mapping_file
+    config_dir = os.path.dirname(MAPPING_FILE) or "."
+    return os.path.join(config_dir, mapping_file)
+
+
+def load_mapping(path=None):
+    with open(path or MAPPING_FILE, "r") as f:
         return json.load(f)
 
 
@@ -354,8 +373,11 @@ def convert_album_to_tag(dry_run: bool | None = None):
 
         session = _make_session(api_key)
 
-        mapping = load_mapping()
-        logger.info(f"Loaded mapping file with {len(mapping)} parent categories.")
+        mapping_path = _resolve_mapping_path(config)
+        mapping = load_mapping(mapping_path)
+        logger.info(
+            f"Loaded mapping file '{mapping_path}' with {len(mapping)} parent categories."
+        )
 
         # ---- Tag + album state, fetched once per user ----
         existing_tags = _get_all_tags(session, immich_url)
