@@ -70,10 +70,26 @@ function Resolve-NextVersion {
 # Everything that can fail is checked before the tag is created, so a failed
 # run never leaves a dangling tag behind.
 
+# Two ways to authenticate, preferring gh: it keeps the credential in the OS
+# credential manager instead of an environment variable.
+$useGh = $false
+if (Get-Command gh -ErrorAction SilentlyContinue) {
+    & gh auth status 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        $useGh = $true
+    } else {
+        Write-Warning "gh is installed but not authenticated -- run 'gh auth login' (falling back to GITHUB_TOKEN)."
+    }
+}
+
 $token = $env:GITHUB_TOKEN
 if (-not $token) { $token = $env:GH_TOKEN }
-if (-not $token -and -not $DryRun) {
-    throw "GITHUB_TOKEN (or GH_TOKEN) is not set. Create a PAT with 'repo' scope and set it, e.g.`n  `$env:GITHUB_TOKEN = '<token>'"
+if (-not $useGh -and -not $token -and -not $DryRun) {
+    throw @"
+No GitHub credentials. Either:
+  1. winget install --id GitHub.cli   (then: gh auth login)      <- recommended
+  2. `$env:GITHUB_TOKEN = '<PAT with repo scope>'
+"@
 }
 
 $repoRoot = Invoke-Git rev-parse --show-toplevel
@@ -136,7 +152,13 @@ if ($DryRun) {
     if ($MoveLatestTag) {
         Write-Host "[dry run] git tag -f latest && git push -f $Remote latest"
     }
-    Write-Host "[dry run] POST https://api.github.com/repos/$slug/releases (tag_name=$Version)"
+    if ($useGh) {
+        Write-Host "[dry run] gh release create $Version --repo $slug --generate-notes --latest"
+    } elseif ($token) {
+        Write-Host "[dry run] POST https://api.github.com/repos/$slug/releases (tag_name=$Version)"
+    } else {
+        Write-Warning "[dry run] No gh auth and no GITHUB_TOKEN -- a real run would stop before tagging."
+    }
     Write-Host ""
     Write-Host "[dry run] Nothing was changed."
     return
@@ -166,32 +188,41 @@ if ($MoveLatestTag) {
 
 # --- Publish the GitHub Release (this is what triggers the versioned build) --
 
-$headers = @{
-    "User-Agent"           = "SyncNextcloudImmich"
-    "Accept"               = "application/vnd.github+json"
-    "X-GitHub-Api-Version" = "2022-11-28"
-    "Authorization"        = "Bearer $token"
-}
-
-$body = @{
-    tag_name               = $Version
-    name                   = $Version
-    generate_release_notes = $true
-    draft                  = $false
-    prerelease             = $false
-    make_latest            = "true"
-} | ConvertTo-Json
-
 Write-Host "Publishing GitHub Release $Version ..."
+$releaseUrl = $null
 try {
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$slug/releases" `
-        -Method Post -Headers $headers -Body $body -ContentType "application/json"
+    if ($useGh) {
+        $releaseUrl = (& gh release create $Version --repo $slug --title $Version --generate-notes --latest 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) { throw $releaseUrl }
+        $releaseUrl = ($releaseUrl -split "`r?`n" | Where-Object { $_ -match "^https://" } | Select-Object -Last 1)
+    } else {
+        $headers = @{
+            "User-Agent"           = "SyncNextcloudImmich"
+            "Accept"               = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+            "Authorization"        = "Bearer $token"
+        }
+        $body = @{
+            tag_name               = $Version
+            name                   = $Version
+            generate_release_notes = $true
+            draft                  = $false
+            prerelease             = $false
+            make_latest            = "true"
+        } | ConvertTo-Json
+
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$slug/releases" `
+            -Method Post -Headers $headers -Body $body -ContentType "application/json"
+        $releaseUrl = $release.html_url
+    }
 } catch {
     throw "Tag $Version was pushed, but creating the Release failed: $($_.Exception.Message)`nCreate it by hand at https://github.com/$slug/releases/new?tag=$Version, or delete the tag and retry:`n  git push $Remote :refs/tags/$Version && git tag -d $Version"
 }
 
+if (-not $releaseUrl) { $releaseUrl = "https://github.com/$slug/releases/tag/$Version" }
+
 Write-Host ""
 Write-Host "Released $Version" -ForegroundColor Green
-Write-Host "  Release:  $($release.html_url)"
+Write-Host "  Release:  $releaseUrl"
 Write-Host "  Actions:  https://github.com/$slug/actions"
 Write-Host "  Image:    ${image}:$Version  and  ${image}:latest  (once the workflow finishes)"

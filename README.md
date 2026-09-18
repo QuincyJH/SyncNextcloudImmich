@@ -171,9 +171,15 @@ So `ghcr.io/quincyjh/syncnextcloudimmich:latest` always resolves to the most rec
 
 A versioned image is only built when a GitHub **release is published** (the underlying action reads the version from the release event). `scripts/release.ps1` does the whole dance:
 
-```powershell
-$env:GITHUB_TOKEN = "<PAT with repo scope>"   # or GH_TOKEN
+Authenticate once, either way — the script prefers `gh` and falls back to the token:
 
+```powershell
+winget install --id GitHub.cli   # then, once:  gh auth login
+# ...or, without gh:
+$env:GITHUB_TOKEN = "<PAT with repo scope>"   # or GH_TOKEN
+```
+
+```powershell
 ./scripts/release.ps1 -DryRun    # show what would happen, change nothing
 ./scripts/release.ps1            # tag + push + publish the release
 ```
