@@ -29,6 +29,7 @@
     .ok { background: #22c55e22; }
     .err { background: #ef444422; }
     .warn { font-size: .82rem; opacity: .8; margin-bottom: .5rem; }
+    .hint { font-size: .78rem; opacity: .65; margin-top: .3rem; }
     .hidden { display: none; }
   </style>
 </head>
@@ -57,6 +58,10 @@
   </div>
 
   <textarea id="editor" spellcheck="false"></textarea>
+  <div class="hint">
+    Tab / Shift+Tab indents inside the editor · press Esc then Tab to move focus out ·
+    Save reformats the JSON with 2-space indentation.
+  </div>
 
   <div class="row" style="margin-top:.6rem">
     <button id="load">Load</button>
@@ -160,6 +165,74 @@ function parseEditor() {
   catch (e) { return { ok: false, error: e.message }; }
 }
 
+// Rewrite the editor with canonical 2-space JSON. Returns true if anything changed
+// so the caller can mention it. Only ever called with already-parsed data.
+function formatEditor(data) {
+  const text = JSON.stringify(data, null, 2);
+  const ed = $("editor");
+  if (ed.value === text) return false;
+  ed.value = text;
+  return true;
+}
+
+// --- Tab-indents-in-the-editor -------------------------------------------
+// A textarea normally hands Tab to the browser, which moves focus to the Load
+// button mid-edit. Swallow it and indent instead, but keep an escape hatch:
+// pressing Esc first restores Tab's usual focus behaviour for keyboard users.
+const INDENT = "  ";
+let tabEscapes = false;
+
+// Prefer execCommand("insertText") so edits stay on the native undo stack;
+// fall back to splicing the value directly where it isn't supported.
+function replaceSelection(text, selStart, selEnd) {
+  const ed = $("editor");
+  ed.setSelectionRange(selStart, selEnd);
+  let inserted = false;
+  try { inserted = document.execCommand("insertText", false, text); } catch (e) { inserted = false; }
+  if (!inserted) {
+    const v = ed.value;
+    ed.value = v.slice(0, selStart) + text + v.slice(selEnd);
+    ed.setSelectionRange(selStart + text.length, selStart + text.length);
+  }
+}
+
+$("editor").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { tabEscapes = true; return; }
+  if (e.key !== "Tab" || e.ctrlKey || e.altKey || e.metaKey) { tabEscapes = false; return; }
+  if (tabEscapes) { tabEscapes = false; return; }  // let the browser move focus
+  e.preventDefault();
+
+  const ed = $("editor");
+  const value = ed.value;
+  const start = ed.selectionStart;
+  const end = ed.selectionEnd;
+  const spansLines = value.slice(start, end).includes("\n");
+
+  // Plain Tab with a caret (or a selection inside one line): just insert indent.
+  if (!spansLines && !e.shiftKey) {
+    replaceSelection(INDENT, start, end);
+    return;
+  }
+
+  // Otherwise indent/outdent every line the selection touches.
+  const blockStart = value.lastIndexOf("\n", start - 1) + 1;
+  const scanFrom = end > start && value[end - 1] === "\n" ? end - 1 : end;
+  const nextBreak = value.indexOf("\n", scanFrom);
+  const blockEnd = nextBreak === -1 ? value.length : nextBreak;
+
+  const lines = value.slice(blockStart, blockEnd).split("\n").map(line => {
+    if (!e.shiftKey) return INDENT + line;
+    if (line.startsWith("\t")) return line.slice(1);
+    let strip = 0;
+    while (strip < INDENT.length && line[strip] === " ") strip++;
+    return line.slice(strip);
+  });
+
+  const block = lines.join("\n");
+  replaceSelection(block, blockStart, blockEnd);
+  ed.setSelectionRange(blockStart, blockStart + block.length);
+});
+
 function validate() {
   const p = parseEditor();
   if (!p.ok) return setStatus("Invalid JSON: " + p.error, "err");
@@ -170,6 +243,7 @@ async function save() {
   if (!token()) return setStatus("Enter the config token first.", "err");
   const p = parseEditor();
   if (!p.ok) return setStatus("Invalid JSON, not saving: " + p.error, "err");
+  const formatted = formatEditor(p.data);
   rememberMaybe();
   setStatus("Saving…", "");
   try {
@@ -180,7 +254,7 @@ async function save() {
     });
     const body = await r.json();
     if (!r.ok) return setStatus("Save rejected (" + r.status + "): " + (body.detail || r.statusText), "err");
-    setStatus("Saved " + (body.file || "") + " ✓", "ok");
+    setStatus("Saved " + (body.file || "") + " ✓" + (formatted ? " (reformatted)" : ""), "ok");
   } catch (e) { setStatus("Request failed: " + e.message, "err"); }
 }
 
