@@ -158,7 +158,35 @@ python app/healthcheck.py
 
 ## CI / releases
 
-`.github/workflows/publish_image.yml` builds and pushes a Docker image to **ghcr.io** on every push to `main` (tagged `latest`) and on published GitHub releases (tagged with the version, `v` prefix stripped).
+`.github/workflows/publish_image.yml` builds and pushes a Docker image to **ghcr.io**:
+
+| Trigger | Image tag | Meaning |
+| --- | --- | --- |
+| Published GitHub release | `<version>` **and** `latest` | The newest released build |
+| Push to `main` | `edge` | Unreleased tip of `main` |
+
+So `ghcr.io/quincyjh/syncnextcloudimmich:latest` always resolves to the most recent release — pin a `<version>` tag only when you need to stay on a specific build. Use `:edge` to track `main`.
+
+### Cutting a release
+
+A versioned image is only built when a GitHub **release is published** (the underlying action reads the version from the release event). `scripts/release.ps1` does the whole dance:
+
+```powershell
+$env:GITHUB_TOKEN = "<PAT with repo scope>"   # or GH_TOKEN
+
+./scripts/release.ps1 -DryRun    # show what would happen, change nothing
+./scripts/release.ps1            # tag + push + publish the release
+```
+
+It picks the next `YYYY.MM.DD.N` version by scanning existing tags (second release today becomes `.2`), or takes `-Version 2026.09.17.3` to override. Before touching anything it verifies the working tree is clean and that `HEAD` is already pushed to `origin/main`, so a release can never point at code the remote doesn't have. Via make:
+
+```bash
+make release-dry                                # preview
+make release                                    # cut it
+make release RELEASE_VERSION=2026.09.17.2       # explicit version
+```
+
+Flags: `-AllowDirty` (tag HEAD despite uncommitted changes), `-MoveLatestTag` (also force-move a git tag named `latest` — cosmetic only; the *image* `latest` tag comes from the release, not from this git tag), `-Remote` / `-Branch`.
 
 ## Notes
 

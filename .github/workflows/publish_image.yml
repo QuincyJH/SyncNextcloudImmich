@@ -1,10 +1,11 @@
 name: Build and publish a Docker image to ghcr.io
 on:
-  # publish on releases, e.g. v2.1.13 (image tagged as "2.1.13" - "v" prefix is removed)
+  # publish on releases, e.g. 2026.09.17.1
+  # image is tagged with the version AND "latest" ("v" prefix is removed)
   release:
     types: [ published ]
 
-  # publish on pushes to the main branch (image tagged as "latest")
+  # publish on pushes to the main branch (image tagged as "edge" - unreleased code)
   push:
     branches:
       - main
@@ -23,12 +24,28 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # push-to-ghcr tags a release build with the version ONLY, and only ever
+      # applies "latest" to non-release builds. Left to itself that makes
+      # ":latest" mean "tip of main" (unreleased). Compute the tags explicitly so
+      # ":latest" tracks the newest release and main builds land on ":edge".
+      - name: Compute image tags
+        id: tags
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            version="${{ github.event.release.tag_name }}"
+            version="${version#v}"
+            echo "image_tag=${version},latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_tag=edge" >> "$GITHUB_OUTPUT"
+          fi
+
       # https://github.com/marketplace/actions/push-to-ghcr
       - name: Build and publish a Docker image for ${{ github.repository }}
         uses: macbre/push-to-ghcr@v14
         with:
           image_name: ${{ github.repository }}  # it will be lowercased internally
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          image_tag: ${{ steps.tags.outputs.image_tag }}
           # optionally push to the Docker Hub (docker.io)
           # docker_io_token: ${{ secrets.DOCKER_IO_ACCESS_TOKEN }}  # see https://hub.docker.com/settings/security
           # customize the username to be used when pushing to the Docker Hub
