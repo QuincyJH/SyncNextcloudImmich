@@ -10,8 +10,9 @@
     event. A bare `git push origin <tag>` therefore publishes nothing new, which
     is why this script creates the Release rather than just pushing the tag.
 
-    Requires GITHUB_TOKEN (or GH_TOKEN) in the environment: a classic PAT with
-    the `repo` scope, or a fine-grained token with Contents: read/write.
+    Authenticates with the gh CLI when it is installed and logged in
+    (`gh auth login`); otherwise needs GITHUB_TOKEN (or GH_TOKEN): a classic PAT
+    with the `repo` scope, or a fine-grained token with Contents: read/write.
 
 .EXAMPLE
     ./scripts/release.ps1
@@ -32,14 +33,30 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Invoke-Git {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
-
-    $output = & git @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "git $($Arguments -join ' ') failed:`n$output"
+# Run a native command, capturing stdout+stderr as text. Two PowerShell traps:
+#  - No param() block on purpose: in an advanced function, "-a"/"-m"/"-f" would
+#    bind to the function's own parameters instead of being passed through.
+#  - Windows PowerShell 5.1 turns every stderr line into an error record under
+#    2>&1, and $ErrorActionPreference = "Stop" makes that fatal -- but git push
+#    writes progress to stderr even on success. Relax it here and judge success
+#    by exit code instead.
+function Invoke-Native {
+    $exe = $args[0]
+    $rest = @($args | Select-Object -Skip 1)
+    $ErrorActionPreference = "Continue"
+    $output = & $exe @rest 2>&1 | ForEach-Object { "$_" }
+    [pscustomobject]@{
+        ExitCode = $LASTEXITCODE
+        Output   = ($output | Out-String).Trim()
     }
-    return ($output | Out-String).Trim()
+}
+
+function Invoke-Git {
+    $result = Invoke-Native git @args
+    if ($result.ExitCode -ne 0) {
+        throw "git $($args -join ' ') failed:`n$($result.Output)"
+    }
+    return $result.Output
 }
 
 function Get-RepoSlug {
@@ -74,8 +91,7 @@ function Resolve-NextVersion {
 # credential manager instead of an environment variable.
 $useGh = $false
 if (Get-Command gh -ErrorAction SilentlyContinue) {
-    & gh auth status 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
+    if ((Invoke-Native gh auth status).ExitCode -eq 0) {
         $useGh = $true
     } else {
         Write-Warning "gh is installed but not authenticated -- run 'gh auth login' (falling back to GITHUB_TOKEN)."
@@ -119,8 +135,7 @@ Invoke-Git fetch --tags --quiet $Remote | Out-Null
 $head = Invoke-Git rev-parse HEAD
 $remoteHead = Invoke-Git rev-parse "$Remote/$Branch"
 if ($head -ne $remoteHead) {
-    & git merge-base --is-ancestor $head "$Remote/$Branch" 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    if ((Invoke-Native git merge-base --is-ancestor $head "$Remote/$Branch").ExitCode -ne 0) {
         throw "HEAD ($($head.Substring(0,7))) is not pushed to $Remote/$Branch. Push your commits first:`n  git push $Remote $Branch"
     }
     Write-Warning "HEAD is behind $Remote/$Branch -- releasing the older commit $($head.Substring(0,7))."
@@ -174,13 +189,13 @@ try {
     Invoke-Git push $Remote $Version | Out-Null
 } catch {
     Write-Warning "Push failed -- removing the local tag so you can retry cleanly."
-    & git tag -d $Version 2>&1 | Out-Null
+    Invoke-Native git tag -d $Version | Out-Null
     throw
 }
 
 if ($MoveLatestTag) {
     # Purely cosmetic for the package: the image's "latest" tag comes from the
-    # push-to-main trigger, not from this git tag.
+    # published release (see publish_image.yml), not from this git tag.
     Write-Host "Moving the 'latest' git tag ..."
     Invoke-Git tag -f latest | Out-Null
     Invoke-Git push -f $Remote latest | Out-Null
@@ -192,9 +207,9 @@ Write-Host "Publishing GitHub Release $Version ..."
 $releaseUrl = $null
 try {
     if ($useGh) {
-        $releaseUrl = (& gh release create $Version --repo $slug --title $Version --generate-notes --latest 2>&1 | Out-String).Trim()
-        if ($LASTEXITCODE -ne 0) { throw $releaseUrl }
-        $releaseUrl = ($releaseUrl -split "`r?`n" | Where-Object { $_ -match "^https://" } | Select-Object -Last 1)
+        $result = Invoke-Native gh release create $Version --repo $slug --title $Version --generate-notes --latest
+        if ($result.ExitCode -ne 0) { throw $result.Output }
+        $releaseUrl = ($result.Output -split "`r?`n" | Where-Object { $_ -match "^https://" } | Select-Object -Last 1)
     } else {
         $headers = @{
             "User-Agent"           = "SyncNextcloudImmich"
